@@ -7,7 +7,13 @@ pub fn default_terminal_font() -> gpui::Font {
         "DejaVu Sans Mono"
     };
 
+    // Keep the platform's text metrics while resolving private-use TUI icons.
     let fallbacks = gpui::FontFallbacks::from_fonts(vec![
+        "JetBrainsMono Nerd Font Mono".to_string(),
+        "JetBrainsMonoNL Nerd Font Mono".to_string(),
+        "JetBrainsMono Nerd Font".to_string(),
+        "Symbols Nerd Font Mono".to_string(),
+        "Symbols Nerd Font".to_string(),
         "SF Mono".to_string(),
         "Menlo".to_string(),
         "Monaco".to_string(),

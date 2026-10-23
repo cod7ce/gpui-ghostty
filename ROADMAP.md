@@ -76,6 +76,12 @@ Deliver a maintainable Rust workspace that bootstraps an embedded terminal contr
 - [x] Refactor: deduplicate output feed+dirty handling.
 - [x] Fix viewport scroll rendering: expose viewport scroll delta and apply incremental line shifting.
 
+## MonoTerm Fork
+
+- [x] Add installed Nerd Font fallbacks for private-use TUI icons.
+- [x] Forward ECH, IL, DL and DECSTBM to Ghostty and add regression tests.
+- [x] Document the `monoterm` maintenance branch and immutable consumer pins in `FORK.md`.
+
 ## User Work
 
 - [x] Cleanup features: make gpui and Zig build required.

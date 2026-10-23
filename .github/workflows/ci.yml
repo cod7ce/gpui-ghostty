@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - monoterm
   pull_request:
 
 concurrency:

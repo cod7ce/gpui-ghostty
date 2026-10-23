@@ -1,5 +1,7 @@
 # GPUI + Ghostty (VT) Embedded Terminal
 
+This is the [MonoTerm maintenance fork](FORK.md) of [Xuanwo/gpui-ghostty](https://github.com/Xuanwo/gpui-ghostty). Downstream terminal fixes live on `monoterm`; consumers should pin a full commit SHA.
+
 This repository is a minimal, pinned, and testable embedded terminal stack:
 
 - VT parsing/state: Ghostty's terminal core (vendored as a submodule)
@@ -19,7 +21,7 @@ This repository is a minimal, pinned, and testable embedded terminal stack:
 
 - Ghostty is vendored at `vendor/ghostty` and pinned to tag `v1.2.3`.
 - Zig is pinned to `0.14.1` (required to build the vendored Ghostty core).
-- GPUI is consumed from Zed pinned to commit `6016d0b8c6a22e586158d3b6f810b3cebb136118`.
+- GPUI is consumed from Zed; the workspace `Cargo.lock` pins commit `cff3ac6f93f506330034652f0d2389591bfb45a0`. Use `--locked` to retain that baseline.
 
 ## Build Prerequisites
 
