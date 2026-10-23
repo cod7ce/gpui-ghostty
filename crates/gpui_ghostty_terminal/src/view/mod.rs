@@ -209,6 +209,7 @@ impl TerminalInput {
 
 pub struct TerminalView {
     session: TerminalSession,
+    appearance: TerminalAppearance,
     viewport_lines: Vec<String>,
     viewport_line_offsets: Vec<usize>,
     viewport_total_len: usize,
@@ -245,8 +246,14 @@ impl ByteSelection {
 
 impl TerminalView {
     pub fn new(session: TerminalSession, focus_handle: FocusHandle) -> Self {
+        let appearance = TerminalAppearance::new(
+            session.default_foreground(),
+            session.default_background(),
+            1.0,
+        );
         Self {
             session,
+            appearance,
             viewport_lines: Vec::new(),
             viewport_line_offsets: Vec::new(),
             viewport_total_len: 0,
@@ -288,8 +295,14 @@ impl TerminalView {
         focus_handle: FocusHandle,
         input: TerminalInput,
     ) -> Self {
+        let appearance = TerminalAppearance::new(
+            session.default_foreground(),
+            session.default_background(),
+            1.0,
+        );
         Self {
             session,
+            appearance,
             viewport_lines: Vec::new(),
             viewport_line_offsets: Vec::new(),
             viewport_total_len: 0,
@@ -308,6 +321,40 @@ impl TerminalView {
             font: crate::default_terminal_font(),
         }
         .with_refreshed_viewport()
+    }
+
+    /// Updates rendering without changing the terminal, PTY, or selection.
+    ///
+    /// Opacity applies only to the default background. Finite values are clamped
+    /// to 0..=1; non-finite values use 1. Explicit colors and glyph opacity are
+    /// preserved. The view must be hosted over a transparent parent/window to
+    /// expose content behind the window.
+    ///
+    /// Style runs contain resolved RGB, so an explicit color equal to a session
+    /// default is indistinguishable from that default and is also remapped.
+    /// OSC color queries continue to report the session's original defaults.
+    pub fn set_appearance(
+        &mut self,
+        foreground: [u8; 3],
+        background: [u8; 3],
+        default_background_opacity: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let [r, g, b] = foreground;
+        let foreground = Rgb { r, g, b };
+        let [r, g, b] = background;
+        let background = Rgb { r, g, b };
+        let appearance =
+            TerminalAppearance::new(foreground, background, default_background_opacity);
+        if self.appearance == appearance {
+            return;
+        }
+
+        self.appearance = appearance;
+        // Shaped lines retain foreground colors even when their text is unchanged.
+        // Keep the raw style runs, viewport, selection, and pending output intact.
+        self.line_layouts.fill(None);
+        cx.notify();
     }
 
     fn utf16_len(s: &str) -> usize {
@@ -1315,11 +1362,109 @@ struct TerminalPrepaintState {
     cursor: Option<PaintQuad>,
 }
 
+const CELL_STYLE_FLAG_INVERSE: u8 = 0x01;
 const CELL_STYLE_FLAG_BOLD: u8 = 0x02;
 const CELL_STYLE_FLAG_ITALIC: u8 = 0x04;
 const CELL_STYLE_FLAG_UNDERLINE: u8 = 0x08;
 const CELL_STYLE_FLAG_FAINT: u8 = 0x10;
+const CELL_STYLE_FLAG_INVISIBLE: u8 = 0x20;
 const CELL_STYLE_FLAG_STRIKETHROUGH: u8 = 0x40;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TerminalAppearance {
+    foreground: Rgb,
+    background: Rgb,
+    default_background_opacity: f32,
+}
+
+impl TerminalAppearance {
+    fn new(foreground: Rgb, background: Rgb, opacity: f32) -> Self {
+        Self {
+            foreground,
+            background,
+            default_background_opacity: if opacity.is_finite() {
+                opacity.clamp(0.0, 1.0)
+            } else {
+                1.0
+            },
+        }
+    }
+
+    fn background_color(self) -> gpui::Hsla {
+        let mut color = hsla_from_rgb(self.background);
+        color.a = self.default_background_opacity;
+        color
+    }
+
+    fn map_style(self, mut run: StyleRun, default_fg: Rgb, default_bg: Rgb) -> StyleRun {
+        // The VT bridge has already swapped inverse colors and resolved conceal.
+        let (source_fg, source_bg, target_fg, target_bg) =
+            if run.flags & CELL_STYLE_FLAG_INVERSE != 0 {
+                (default_bg, default_fg, self.background, self.foreground)
+            } else {
+                (default_fg, default_bg, self.foreground, self.background)
+            };
+        if run.fg == source_fg {
+            run.fg = target_fg;
+        }
+        if run.bg == source_bg {
+            run.bg = target_bg;
+        }
+        if run.flags & CELL_STYLE_FLAG_INVISIBLE != 0 {
+            run.fg = run.bg;
+        }
+        run
+    }
+}
+
+fn has_default_background(run: &StyleRun, default_bg: Rgb) -> bool {
+    // Inverse backgrounds represent the original foreground and stay opaque.
+    run.flags & CELL_STYLE_FLAG_INVERSE == 0 && run.bg == default_bg
+}
+
+fn bounds_outside(bounds: Bounds<Pixels>, excluded: Option<Bounds<Pixels>>) -> Vec<Bounds<Pixels>> {
+    let Some(excluded) = excluded else {
+        return vec![bounds];
+    };
+    let excluded = bounds.intersect(&excluded);
+    if excluded.is_empty() {
+        return vec![bounds];
+    }
+
+    [
+        Bounds::from_corners(bounds.origin, point(bounds.right(), excluded.top())),
+        Bounds::from_corners(
+            point(bounds.left(), excluded.bottom()),
+            bounds.bottom_right(),
+        ),
+        Bounds::from_corners(
+            point(bounds.left(), excluded.top()),
+            point(excluded.left(), excluded.bottom()),
+        ),
+        Bounds::from_corners(
+            point(excluded.right(), excluded.top()),
+            point(bounds.right(), excluded.bottom()),
+        ),
+    ]
+    .into_iter()
+    .filter(|bounds| !bounds.is_empty())
+    .collect()
+}
+
+fn paint_outside(
+    bounds: Bounds<Pixels>,
+    excluded: Option<Bounds<Pixels>>,
+    window: &mut Window,
+    mut paint: impl FnMut(&mut Window),
+) {
+    let Some(excluded) = excluded.filter(|excluded| !bounds.intersect(excluded).is_empty()) else {
+        paint(window);
+        return;
+    };
+    for bounds in bounds_outside(bounds, Some(excluded)) {
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| paint(window));
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TextRunKey {
@@ -1361,7 +1506,10 @@ fn font_for_flags(base: &gpui::Font, flags: u8) -> gpui::Font {
 
 fn color_for_key(key: TextRunKey) -> gpui::Hsla {
     let mut color = hsla_from_rgb(key.fg);
-    if key.flags & CELL_STYLE_FLAG_FAINT != 0 {
+    if key.flags & CELL_STYLE_FLAG_INVISIBLE != 0 {
+        // Matching an opaque glyph to a translucent background would reveal it.
+        color.a = 0.0;
+    } else if key.flags & CELL_STYLE_FLAG_FAINT != 0 {
         color = color.alpha(0.65);
     }
     color
@@ -1573,8 +1721,15 @@ impl Element for TerminalTextElement {
         style.font_family = font.family.clone();
         style.font_features = crate::default_terminal_font_features();
         style.font_fallbacks = font.fallbacks.clone();
-        let default_fg = { self.view.read(cx).session.default_foreground() };
-        style.color = hsla_from_rgb(default_fg);
+        let (appearance, default_fg, default_bg) = {
+            let view = self.view.read(cx);
+            (
+                view.appearance,
+                view.session.default_foreground(),
+                view.session.default_background(),
+            )
+        };
+        style.color = hsla_from_rgb(appearance.foreground);
         let rem_size = window.rem_size();
         let font_size = style.font_size.to_pixels(rem_size);
         let line_height = style.line_height.to_pixels(style.font_size, rem_size);
@@ -1617,6 +1772,7 @@ impl Element for TerminalTextElement {
                 {
                     let mut byte_pos = 0usize;
                     for style in style_runs.iter() {
+                        let style = appearance.map_style(*style, default_fg, default_bg);
                         let key = TextRunKey {
                             fg: style.fg,
                             flags: style.flags
@@ -1624,6 +1780,7 @@ impl Element for TerminalTextElement {
                                     | CELL_STYLE_FLAG_ITALIC
                                     | CELL_STYLE_FLAG_UNDERLINE
                                     | CELL_STYLE_FLAG_FAINT
+                                    | CELL_STYLE_FLAG_INVISIBLE
                                     | CELL_STYLE_FLAG_STRIKETHROUGH),
                         };
 
@@ -1688,7 +1845,6 @@ impl Element for TerminalTextElement {
             }
         });
 
-        let default_bg = { self.view.read(cx).session.default_background() };
         let background_quads = cell_metrics(window, &font)
             .map(|(cell_width, _)| {
                 let origin = bounds.origin;
@@ -1702,9 +1858,10 @@ impl Element for TerminalTextElement {
 
                     let y = origin.y + line_height * row as f32;
                     for run in runs.iter() {
-                        if run.bg == default_bg {
+                        if has_default_background(run, default_bg) {
                             continue;
                         }
+                        let run = appearance.map_style(*run, default_fg, default_bg);
 
                         let x =
                             origin.x + px(cell_width * (run.start_col.saturating_sub(1)) as f32);
@@ -1779,17 +1936,28 @@ impl Element for TerminalTextElement {
                         .text_system()
                         .shape_line(text.clone(), font_size, &[run], force_width);
 
-                let bg = {
+                let background = {
                     let view = self.view.read(cx);
                     let row_index = row.saturating_sub(1) as usize;
                     view.viewport_style_runs
                         .get(row_index)
                         .and_then(|runs| {
-                            runs.iter().find_map(|run| {
-                                (col >= run.start_col && col <= run.end_col).then_some(run.bg)
-                            })
+                            runs.iter()
+                                .find(|run| col >= run.start_col && col <= run.end_col)
                         })
-                        .unwrap_or(default_bg)
+                        .filter(|run| !has_default_background(run, default_bg))
+                        .map(|run| {
+                            hsla_from_rgb(appearance.map_style(*run, default_fg, default_bg).bg)
+                        })
+                        .unwrap_or_else(|| {
+                            if appearance.default_background_opacity == 1.0 {
+                                // Keep the opaque overlay's single paint path.
+                                appearance.background_color()
+                            } else {
+                                // The translucent base is already painted once.
+                                hsla(0.0, 0.0, 0.0, 0.0)
+                            }
+                        })
                 };
 
                 let cell_len = {
@@ -1806,12 +1974,7 @@ impl Element for TerminalTextElement {
 
                 let marked_text_background = fill(
                     Bounds::new(origin, size(px(cell_width * cell_len as f32), line_height)),
-                    rgba(
-                        (u32::from(bg.r) << 24)
-                            | (u32::from(bg.g) << 16)
-                            | (u32::from(bg.b) << 8)
-                            | 0xFF,
-                    ),
+                    background,
                 );
 
                 Some(((shaped, origin), marked_text_background))
@@ -1865,7 +2028,6 @@ impl Element for TerminalTextElement {
         let box_drawing_quads = cell_metrics(window, &font)
             .map(|(cell_width, _)| {
                 use unicode_width::UnicodeWidthChar as _;
-                let default_fg = run_color;
                 let mut quads = Vec::new();
 
                 let view = self.view.read(cx);
@@ -1896,6 +2058,7 @@ impl Element for TerminalTextElement {
                                     })
                                 })
                                 .map(|run| {
+                                    let run = appearance.map_style(*run, default_fg, default_bg);
                                     let key = TextRunKey {
                                         fg: run.fg,
                                         flags: run.flags
@@ -1903,11 +2066,12 @@ impl Element for TerminalTextElement {
                                                 | CELL_STYLE_FLAG_BOLD
                                                 | CELL_STYLE_FLAG_ITALIC
                                                 | CELL_STYLE_FLAG_UNDERLINE
+                                                | CELL_STYLE_FLAG_INVISIBLE
                                                 | CELL_STYLE_FLAG_STRIKETHROUGH),
                                     };
                                     color_for_key(key)
                                 })
-                                .unwrap_or(default_fg);
+                                .unwrap_or(run_color);
 
                             let x = bounds.left() + px(cell_width * (col.saturating_sub(1)) as f32);
                             let cell_bounds =
@@ -1937,8 +2101,7 @@ impl Element for TerminalTextElement {
                 .flatten()
         }
         .and_then(|(col, row)| {
-            let background = { self.view.read(cx).session.default_background() };
-            let cursor_color = cursor_color_for_background(background);
+            let cursor_color = cursor_color_for_background(appearance.background);
             let y = bounds.top() + line_height * (row.saturating_sub(1)) as f32;
             let row_index = row.saturating_sub(1) as usize;
             let line = shaped_lines.get(row_index)?;
@@ -1985,32 +2148,49 @@ impl Element for TerminalTextElement {
         );
 
         window.paint_layer(bounds, |window| {
-            let default_bg = { self.view.read(cx).session.default_background() };
-            window.paint_quad(fill(bounds, hsla_from_rgb(default_bg)));
+            let appearance = self.view.read(cx).appearance;
+            window.paint_quad(fill(bounds, appearance.background_color()));
 
-            for quad in prepaint.background_quads.drain(..) {
-                window.paint_quad(quad);
-            }
-
-            for quad in prepaint.selection_quads.drain(..) {
-                window.paint_quad(quad);
+            // Only a transparent IME overlay needs exclusion. Traverse each
+            // collection once; split painting only for intersecting rows/quads.
+            let excluded = prepaint
+                .marked_text_background
+                .as_ref()
+                .filter(|bg| bg.background.is_transparent())
+                .map(|bg| bg.bounds);
+            for quad in prepaint
+                .background_quads
+                .drain(..)
+                .chain(prepaint.selection_quads.drain(..))
+            {
+                paint_outside(quad.bounds, excluded, window, |window| {
+                    window.paint_quad(quad.clone());
+                });
             }
 
             let origin = bounds.origin;
             for (row, line) in prepaint.shaped_lines.iter().enumerate() {
                 let y = origin.y + prepaint.line_height * row as f32;
-                let _ = line.paint(
+                let row_bounds = Bounds::new(
                     point(origin.x, y),
-                    prepaint.line_height,
-                    gpui::TextAlign::Left,
-                    None,
-                    window,
-                    cx,
+                    size(bounds.size.width, prepaint.line_height),
                 );
+                paint_outside(row_bounds, excluded, window, |window| {
+                    let _ = line.paint(
+                        point(origin.x, y),
+                        prepaint.line_height,
+                        gpui::TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                });
             }
 
             for quad in prepaint.box_drawing_quads.drain(..) {
-                window.paint_quad(quad);
+                paint_outside(quad.bounds, excluded, window, |window| {
+                    window.paint_quad(quad.clone());
+                });
             }
 
             if let Some(bg) = prepaint.marked_text_background.take() {
@@ -2082,8 +2262,7 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .bg(gpui::black())
-            .text_color(gpui::white())
+            .text_color(hsla_from_rgb(self.appearance.foreground))
             .font(self.font.clone())
             .whitespace_nowrap()
             .child(TerminalTextElement { view: cx.entity() })
@@ -2156,6 +2335,172 @@ mod tests {
 
         let local = window_position_to_local(bounds, gpui::point(gpui::px(110.0), gpui::px(30.0)));
         assert_eq!(local, gpui::point(gpui::px(10.0), gpui::px(10.0)));
+    }
+
+    fn style_run(fg: Rgb, bg: Rgb, flags: u8) -> ghostty_vt::StyleRun {
+        ghostty_vt::StyleRun {
+            start_col: 1,
+            end_col: 4,
+            fg,
+            bg,
+            flags,
+        }
+    }
+
+    #[test]
+    fn appearance_remaps_defaults_without_changing_explicit_colors_or_glyph_alpha() {
+        let default_fg = Rgb {
+            r: 220,
+            g: 220,
+            b: 220,
+        };
+        let default_bg = Rgb { r: 0, g: 0, b: 0 };
+        let foreground = Rgb {
+            r: 20,
+            g: 30,
+            b: 40,
+        };
+        let background = Rgb {
+            r: 240,
+            g: 230,
+            b: 220,
+        };
+        let appearance = super::TerminalAppearance::new(foreground, background, 0.25);
+        let defaults = style_run(default_fg, default_bg, 0);
+        let mapped = appearance.map_style(defaults, default_fg, default_bg);
+        assert_eq!(mapped, style_run(foreground, background, 0));
+        assert!(super::has_default_background(&defaults, default_bg));
+        assert_eq!(appearance.background_color().a, 0.25);
+        assert_eq!(
+            super::color_for_key(super::TextRunKey {
+                fg: mapped.fg,
+                flags: 0
+            })
+            .a,
+            1.0
+        );
+
+        let explicit = style_run(
+            Rgb { r: 255, g: 0, b: 0 },
+            Rgb { r: 0, g: 0, b: 255 },
+            super::CELL_STYLE_FLAG_BOLD,
+        );
+        assert_eq!(
+            appearance.map_style(explicit, default_fg, default_bg),
+            explicit
+        );
+        assert!(!super::has_default_background(&explicit, default_bg));
+        assert_eq!(super::hsla_from_rgb(explicit.bg).a, 1.0);
+        // Classification uses source RGB, even if an explicit color equals the override.
+        assert!(!super::has_default_background(
+            &style_run(default_fg, background, 0),
+            default_bg
+        ));
+        assert_eq!(
+            super::color_for_key(super::TextRunKey {
+                fg: mapped.fg,
+                flags: super::CELL_STYLE_FLAG_FAINT,
+            })
+            .a,
+            0.65
+        );
+    }
+
+    #[test]
+    fn appearance_handles_inverse_and_concealed_styles() {
+        let default_fg = Rgb {
+            r: 220,
+            g: 220,
+            b: 220,
+        };
+        let default_bg = Rgb { r: 0, g: 0, b: 0 };
+        let foreground = Rgb {
+            r: 20,
+            g: 30,
+            b: 40,
+        };
+        let background = Rgb {
+            r: 240,
+            g: 230,
+            b: 220,
+        };
+        let appearance = super::TerminalAppearance::new(foreground, background, 0.0);
+        let inverse = style_run(default_bg, default_fg, super::CELL_STYLE_FLAG_INVERSE);
+        let mapped = appearance.map_style(inverse, default_fg, default_bg);
+        assert_eq!((mapped.fg, mapped.bg), (background, foreground));
+        assert!(!super::has_default_background(&inverse, default_bg));
+        assert_eq!(super::hsla_from_rgb(mapped.bg).a, 1.0);
+
+        for flags in [
+            super::CELL_STYLE_FLAG_INVISIBLE,
+            super::CELL_STYLE_FLAG_INVISIBLE | super::CELL_STYLE_FLAG_INVERSE,
+        ] {
+            let resolved_bg = if flags & super::CELL_STYLE_FLAG_INVERSE != 0 {
+                default_fg
+            } else {
+                default_bg
+            };
+            let hidden = style_run(resolved_bg, resolved_bg, flags);
+            let mapped = appearance.map_style(hidden, default_fg, default_bg);
+            assert_eq!(mapped.fg, mapped.bg);
+            assert_eq!(
+                super::color_for_key(super::TextRunKey {
+                    fg: mapped.fg,
+                    flags
+                })
+                .a,
+                0.0
+            );
+        }
+    }
+
+    #[test]
+    fn appearance_normalizes_opacity() {
+        let color = Rgb { r: 0, g: 0, b: 0 };
+        for (input, expected) in [
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (0.4, 0.4),
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+            (f32::NEG_INFINITY, 1.0),
+        ] {
+            let appearance = super::TerminalAppearance::new(color, color, input);
+            assert_eq!(appearance.background_color().a, expected);
+        }
+    }
+
+    #[test]
+    fn ime_exclusion_partitions_bounds_without_overlap() {
+        use gpui::{Bounds, point, px, size};
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(80.0)));
+        assert_eq!(super::bounds_outside(bounds, None), vec![bounds]);
+        for excluded in [
+            Bounds::new(point(px(30.0), px(40.0)), size(px(20.0), px(10.0))),
+            Bounds::new(point(px(5.0), px(15.0)), size(px(20.0), px(10.0))),
+            Bounds::new(point(px(200.0), px(200.0)), size(px(20.0), px(10.0))),
+            bounds,
+        ] {
+            let pieces = super::bounds_outside(bounds, Some(excluded));
+            let mut area = 0.0;
+            for (index, piece) in pieces.iter().enumerate() {
+                assert_eq!(piece.intersect(&bounds), *piece);
+                assert!(piece.intersect(&excluded).is_empty());
+                for other in &pieces[index + 1..] {
+                    assert!(piece.intersect(other).is_empty());
+                }
+                area += f32::from(piece.size.width) * f32::from(piece.size.height);
+            }
+            let clipped = bounds.intersect(&excluded);
+            let removed = if clipped.is_empty() {
+                0.0
+            } else {
+                f32::from(clipped.size.width) * f32::from(clipped.size.height)
+            };
+            assert_eq!(area, 8000.0 - removed);
+        }
     }
 
     #[test]

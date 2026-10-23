@@ -7,6 +7,9 @@ This fork of [Xuanwo/gpui-ghostty](https://github.com/Xuanwo/gpui-ghostty) is ma
 - Add installed Nerd Font families to the terminal fallback list while retaining the platform's primary monospace font. Fonts are not bundled.
 - Forward erase-character, insert-line, delete-line and scrolling-region operations from the VT stream handler to Ghostty. These fix stale text and repeated rows in Neo-tree.
 - Cover those VT operations in `crates/gpui_ghostty_terminal/tests/terminal_edits.rs`.
+- Expose `TerminalView::set_appearance([u8; 3], [u8; 3], f32, cx)` for live default foreground/background overrides and default-background opacity. The setter retains terminal state, selection and pending output. Explicit cell backgrounds and text remain opaque, with normal faint-text semantics. Four rendering tests cover color mapping, inverse/conceal, opacity normalization and IME clipping.
+
+Appearance overrides affect rendering only. The VT bridge returns resolved RGB, so explicit RGB equal to a session default cannot be distinguished and is also remapped. OSC color queries still return the original session defaults. Hosts must provide transparent parent/window surfaces for glass effects. The default opacity is 1.0; existing consumers remain opaque unless they call the setter.
 
 The Ghostty submodule and upstream GPUI lockfile remain at their existing revisions. MonoTerm uses a local GPUI path substitution to share its GPUI instance with this crate; that environment-specific substitution is deliberately not part of this fork.
 
