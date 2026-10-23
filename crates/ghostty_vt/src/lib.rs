@@ -184,7 +184,7 @@ impl Terminal {
 
         let slice = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) };
         let mut out = Vec::with_capacity(bytes.len / 8);
-        for chunk in slice.chunks_exact(8) {
+        for chunk in slice.as_chunks::<8>().0 {
             out.push(CellStyle {
                 fg: Rgb {
                     r: chunk[0],
@@ -222,7 +222,7 @@ impl Terminal {
 
         let slice = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) };
         let mut out = Vec::with_capacity(bytes.len / 12);
-        for chunk in slice.chunks_exact(12) {
+        for chunk in slice.as_chunks::<12>().0 {
             out.push(StyleRun {
                 start_col: u16::from_ne_bytes([chunk[0], chunk[1]]),
                 end_col: u16::from_ne_bytes([chunk[2], chunk[3]]),
@@ -258,7 +258,7 @@ impl Terminal {
 
         let slice = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) };
         let mut out = Vec::with_capacity(bytes.len / 2);
-        for chunk in slice.chunks_exact(2) {
+        for chunk in slice.as_chunks::<2>().0 {
             out.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
         unsafe { ghostty_vt_sys::ghostty_vt_bytes_free(bytes) };
