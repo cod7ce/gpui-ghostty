@@ -24,7 +24,7 @@ jobs:
         with:
           submodules: recursive
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt
       - name: Rustfmt
@@ -39,7 +39,7 @@ jobs:
         with:
           submodules: recursive
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
@@ -61,7 +61,7 @@ jobs:
         with:
           submodules: recursive
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - name: Setup Zig
